@@ -1,0 +1,21 @@
+[Unit]
+Description=AI Agent Yellow Page
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/agent-yellow-page
+Environment=YELLOWPAGE_HOST=0.0.0.0
+Environment=YELLOWPAGE_PORT=8000
+Environment=YELLOWPAGE_DB=/var/lib/yellowpage/yellowpage.db
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/agent-yellow-page/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=3
+User=root
+StandardOutput=append:/var/log/yellowpage/yellowpage.log
+StandardError=append:/var/log/yellowpage/yellowpage.log
+
+[Install]
+WantedBy=multi-user.target
