@@ -12,7 +12,8 @@ dependencies = [
     "pydantic>=2.7",
     "python-ulid>=3.0",
     "cryptography>=43.0",
-    "httpx>=0.27",  # for examples / tests
+    "httpx>=0.27",  # for examples / tests / client
+    "click>=8.1",   # for the CLI
 ]
 
 [project.optional-dependencies]
@@ -23,7 +24,8 @@ dev = [
 ]
 
 [project.scripts]
-yellowpage = "app.cli:main"
+yellowpage = "app.main:main"
+agent-yp = "app.cli:main"
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]
