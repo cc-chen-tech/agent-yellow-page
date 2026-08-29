@@ -31,8 +31,8 @@ jobs:
         run: |
           set -e
           cd "$DEPLOY_DIR"
-          sudo -u runner .venv/bin/pip install --quiet --upgrade pip
-          sudo -u runner .venv/bin/pip install --quiet -e ".[dev]"
+          .venv/bin/pip install --quiet --upgrade pip
+          .venv/bin/pip install --quiet -e ".[dev]"
 
       - name: Run tests as a smoke check
         run: |
