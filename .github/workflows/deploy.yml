@@ -45,11 +45,11 @@ jobs:
           set -e
           sudo systemctl restart "$SERVICE_NAME"
           sleep 2
-          sudo systemctl is-active --quiet "$SERVICE_NAME" || {
+          if ! sudo systemctl is-active "$SERVICE_NAME" >/dev/null; then
             echo "service failed to come up"
             sudo journalctl -u "$SERVICE_NAME" --no-pager -n 40
             exit 1
-          }
+          fi
 
       - name: Health check
         run: |
