@@ -19,7 +19,11 @@ jobs:
           set -e
           cd "$DEPLOY_DIR"
           echo "before: $(git rev-parse --short HEAD)"
-          git fetch origin main
+          for i in 1 2 3; do
+            if git fetch origin main; then break; fi
+            echo "fetch attempt $i failed, retrying in 5s"
+            sleep 5
+          done
           git reset --hard origin/main
           echo "after:  $(git rev-parse --short HEAD)"
 
