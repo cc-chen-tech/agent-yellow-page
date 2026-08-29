@@ -256,7 +256,7 @@ def test_duplicate_name_rejected(env):
     assert r2.exit_code == 0, r2.output
     r3 = runner.invoke(cli, ["init", "--name", name])
     assert r3.exit_code != 0
-    assert "name already taken" in r3.output or "rejected" in r3.output
+    assert "already taken" in r3.output or "rejected" in r3.output
 
 
 def test_init_preserves_user_metadata(env):
@@ -299,3 +299,73 @@ def test_list_json_output(env):
     parsed = json.loads(result.output)
     assert "items" in parsed
     assert "total" in parsed
+
+
+# --- name check / pre-flight -----------------------------------------------
+
+
+def test_check_name_available(env):
+    runner = CliRunner()
+    result = runner.invoke(cli, ["check-name", f"free-{uuid.uuid4().hex[:8]}"])
+    assert result.exit_code == 0
+    assert json.loads(result.output)["available"] is True
+
+
+def test_check_name_taken(env):
+    server, _ = env
+    import httpx
+
+    kp = KeyPair.generate()
+    name = f"taken-{uuid.uuid4().hex[:8]}"
+    httpx.post(
+        f"{server.base_url()}/v0/agents",
+        json={"name": name, "public_key": "ed25519:" + kp.public_b64},
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["check-name", name])
+    assert result.exit_code == 1
+    body = json.loads(result.output)
+    assert body["available"] is False
+    assert "taken" in body["reason"]
+
+
+def test_init_rejects_taken_name_without_force(env):
+    server, cfg_path = env
+    import httpx
+
+    kp = KeyPair.generate()
+    name = f"dup-{uuid.uuid4().hex[:8]}"
+    # pre-register via API
+    httpx.post(
+        f"{server.base_url()}/v0/agents",
+        json={"name": name, "public_key": "ed25519:" + kp.public_b64},
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["init", "--name", name])
+    assert result.exit_code != 0
+    assert "already taken" in result.output
+    # Crucially: no config should have been written
+    assert not os.path.exists(cfg_path)
+    # And no extra agent was created (still only the one we registered via API)
+    r = httpx.get(f"{server.base_url()}/v0/agents/{name}")
+    assert r.status_code == 200
+    assert r.json()["version"] == 1  # version 1, not bumped
+
+
+def test_init_force_attempts_despite_taken_name(env):
+    server, cfg_path = env
+    import httpx
+
+    kp = KeyPair.generate()
+    name = f"force-{uuid.uuid4().hex[:8]}"
+    httpx.post(
+        f"{server.base_url()}/v0/agents",
+        json={"name": name, "public_key": "ed25519:" + kp.public_b64},
+    )
+    runner = CliRunner()
+    result = runner.invoke(cli, ["init", "--name", name, "--force"])
+    assert result.exit_code != 0
+    # server returns 409 (caught by the HTTPStatusError branch)
+    assert "rejected" in result.output or "409" in result.output
+    # no config written
+    assert not os.path.exists(cfg_path)

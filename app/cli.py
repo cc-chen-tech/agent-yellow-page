@@ -113,6 +113,11 @@ def cli(ctx: click.Context, server: str | None, config_path: Path | None) -> Non
 @click.option("--endpoint", default=None, help="agent service URL (https://...)")
 @click.option("--tag", "tags", multiple=True, help="repeat for multiple")
 @click.option("--metadata", default=None, help="JSON string")
+@click.option(
+    "--force",
+    is_flag=True,
+    help="skip the pre-flight name check (use only if you want the server to 409)",
+)
 @click.pass_context
 def init(
     ctx: click.Context,
@@ -122,6 +127,7 @@ def init(
     endpoint: str | None,
     tags: tuple[str, ...],
     metadata: str | None,
+    force: bool,
 ) -> None:
     """Generate a keypair, register on the server, save config."""
     cfg_path: Path = ctx.obj["config_path"]
@@ -129,6 +135,23 @@ def init(
         raise click.ClickException(
             f"config already exists at {cfg_path} — run `agent-yp reset` first to overwrite"
         )
+
+    # Pre-flight: check that the name is free. Saves a wasted register
+    # roundtrip (and a wasted keypair generation) when the name is taken.
+    if not force:
+        with _client(ctx) as c:
+            try:
+                c.get(name)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code != 404:
+                    raise
+                # 404 → name is free, fall through
+            else:
+                raise click.ClickException(
+                    f"name '{name}' is already taken — pick a different one, "
+                    f"or use `agent-yp check-name` to verify first "
+                    f"(or pass --force to attempt and let the server 409)"
+                )
 
     kp = KeyPair.generate()
     public_key = "ed25519:" + kp.public_b64
@@ -167,6 +190,35 @@ def init(
     _save(cfg_path, cfg)
     click.echo(f"✓ registered  id={card['id']}  name={card['name']}  version={card['version']}")
     click.echo(f"  config saved to {cfg_path}")
+
+
+# --- name check ------------------------------------------------------------
+
+
+@cli.command("check-name")
+@click.argument("name")
+@click.pass_context
+def check_name(ctx: click.Context, name: str) -> None:
+    """Check whether a name is available.
+
+    Exit 0 if available, exit 1 if taken. Outputs a single JSON line so
+    it's easy to consume in shell scripts:
+
+        $ agent-yp check-name weather-bot
+        {"name": "weather-bot", "available": false, "reason": "name already taken"}
+    """
+    with _client(ctx) as c:
+        try:
+            c.get(name)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                click.echo(json.dumps({"name": name, "available": True}))
+                return
+            raise
+    click.echo(
+        json.dumps({"name": name, "available": False, "reason": "name already taken"})
+    )
+    raise SystemExit(1)
 
 
 # --- whoami / get / list ---------------------------------------------------
