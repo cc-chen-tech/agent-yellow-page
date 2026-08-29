@@ -151,3 +151,98 @@ class YellowPageClient:
         headers = self._sign_headers("DELETE", path, b"")
         r = self._http.delete(path, headers=headers)
         r.raise_for_status()
+
+    # --- mailbox --------------------------------------------------------- #
+
+    def send_message(
+        self,
+        recipient_id_or_name: str,
+        body: str,
+        *,
+        subject: str | None = None,
+        in_reply_to: str | None = None,
+    ) -> dict:
+        path = "/v0/messages"
+        import json as _json
+
+        body_bytes = _json.dumps(
+            {
+                "recipient_id": recipient_id_or_name,
+                "subject": subject,
+                "body": body,
+                "in_reply_to": in_reply_to,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        # We can ONLY sign writes when the client has both agent_id and keypair
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set for send_message")
+        headers = self._sign_headers("POST", path, body_bytes)
+        headers["Content-Type"] = "application/json"
+        r = self._http.post(path, content=body_bytes, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def inbox(self, *, unread: bool = False, limit: int = 50, offset: int = 0) -> dict:
+        path = "/v0/messages/inbox"
+        # reading your own inbox is also signed
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set for inbox")
+        headers = self._sign_headers("GET", path, b"")
+        params = {"unread": str(unread).lower(), "limit": str(limit), "offset": str(offset)}
+        r = self._http.get(path + "?" + urlencode(params), headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def outbox(self, *, limit: int = 50, offset: int = 0) -> dict:
+        path = "/v0/messages/outbox"
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set for outbox")
+        headers = self._sign_headers("GET", path, b"")
+        params = {"limit": str(limit), "offset": str(offset)}
+        r = self._http.get(path + "?" + urlencode(params), headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def get_message(self, message_id: str) -> dict:
+        path = f"/v0/messages/{message_id}"
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set")
+        headers = self._sign_headers("GET", path, b"")
+        r = self._http.get(path, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def mark_read(self, message_id: str) -> dict:
+        path = f"/v0/messages/{message_id}"
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set")
+        import json as _json
+
+        body_bytes = _json.dumps(
+            {"action": "mark_read"}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        headers = self._sign_headers("PATCH", path, body_bytes)
+        headers["Content-Type"] = "application/json"
+        r = self._http.patch(path, content=body_bytes, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def delete_message(self, message_id: str) -> None:
+        path = f"/v0/messages/{message_id}"
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set")
+        headers = self._sign_headers("DELETE", path, b"")
+        r = self._http.delete(path, headers=headers)
+        r.raise_for_status()
+
+    def thread(self, thread_id: str, *, limit: int = 200) -> list[dict]:
+        path = f"/v0/threads/{thread_id}"
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set")
+        headers = self._sign_headers("GET", path, b"")
+        params = {"limit": str(limit)}
+        r = self._http.get(path + "?" + urlencode(params), headers=headers)
+        r.raise_for_status()
+        return r.json()

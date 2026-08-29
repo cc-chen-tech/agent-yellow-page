@@ -353,6 +353,207 @@ def update(
     click.echo(f"✓ updated  version={card['version']}  id={card['id']}")
 
 
+# --- mailbox (send / reply / inbox / outbox / read / thread / mark-read / delete) ---
+
+
+@cli.command()
+@click.argument("recipient")
+@click.option("--subject", "-s", default=None, help="subject line")
+@click.option("--body", "-b", required=True, help="message body")
+@click.pass_context
+def send(
+    ctx: click.Context,
+    recipient: str,
+    subject: str | None,
+    body: str,
+) -> None:
+    """Send a message to another agent (signed with your private key)."""
+    cfg = _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            msg = c.send_message(recipient, body=body, subject=subject)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"recipient not found: {recipient}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("not allowed (must be participant of parent message)") from e
+            raise
+    click.echo(f"✓ sent  id={msg['id']}  thread={msg['thread_id']}  to={msg['recipient_name']}")
+
+
+@cli.command()
+@click.argument("message_id")
+@click.option("--body", "-b", required=True, help="reply body")
+@click.option("--subject", "-s", default=None, help="override subject (default: 'Re: <original>')")
+@click.pass_context
+def reply(
+    ctx: click.Context,
+    message_id: str,
+    body: str,
+    subject: str | None,
+) -> None:
+    """Reply to a message (uses in_reply_to; same thread)."""
+    cfg = _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            original = c.get_message(message_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"message not found: {message_id}") from e
+            raise
+        # figure out recipient = the other side
+        if original["sender_id"] == cfg["agent_id"]:
+            recipient = original["recipient_id"]  # reply to original recipient
+        else:
+            recipient = original["sender_id"]  # reply to original sender
+        subj = subject
+        if subj is None and original.get("subject"):
+            orig = original["subject"]
+            subj = orig if orig.startswith("Re: ") else f"Re: {orig}"
+        try:
+            msg = c.send_message(
+                recipient, body=body, subject=subj, in_reply_to=message_id
+            )
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                raise click.ClickException("not allowed") from e
+            raise
+    click.echo(f"✓ replied  id={msg['id']}  thread={msg['thread_id']}")
+
+
+@cli.command()
+@click.option("--unread", is_flag=True, help="only unread")
+@click.option("--limit", default=50, type=click.IntRange(1, 200), show_default=True)
+@click.option("--offset", default=0, type=click.IntRange(min=0), show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="raw JSON output")
+@click.pass_context
+def inbox(
+    ctx: click.Context,
+    unread: bool,
+    limit: int,
+    offset: int,
+    as_json: bool,
+) -> None:
+    """List your inbox (signed)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        result = c.inbox(unread=unread, limit=limit, offset=offset)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"total: {result['total']}  unread: {result['unread']}  showing: {len(result['items'])}")
+    for m in result["items"]:
+        flag = "U " if m["read_at"] is None else "  "
+        sub = f"  {m['subject']}" if m.get("subject") else ""
+        click.echo(
+            f"  {flag}{m['id']}  from={m['sender_name']:24s}  thread={m['thread_id'][:10]}…{sub}"
+        )
+        body_preview = m["body"].splitlines()[0][:80] if m["body"] else ""
+        if body_preview:
+            click.echo(f"      {body_preview}")
+
+
+@cli.command()
+@click.option("--limit", default=50, type=click.IntRange(1, 200), show_default=True)
+@click.option("--offset", default=0, type=click.IntRange(min=0), show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="raw JSON output")
+@click.pass_context
+def outbox(
+    ctx: click.Context,
+    limit: int,
+    offset: int,
+    as_json: bool,
+) -> None:
+    """List your outbox (signed)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        result = c.outbox(limit=limit, offset=offset)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"total: {result['total']}  showing: {len(result['items'])}")
+    for m in result["items"]:
+        sub = f"  {m['subject']}" if m.get("subject") else ""
+        click.echo(
+            f"  {m['id']}  to={m['recipient_name']:24s}  thread={m['thread_id'][:10]}…{sub}"
+        )
+
+
+@cli.command()
+@click.argument("message_id")
+@click.pass_context
+def read(ctx: click.Context, message_id: str) -> None:
+    """Read a single message (signed; must be sender or recipient)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            m = c.get_message(message_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"message not found: {message_id}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("not a participant") from e
+            raise
+    sub = m.get("subject") or "(no subject)"
+    click.echo(f"From:    {m['sender_name']}  ({m['sender_id']})")
+    click.echo(f"To:      {m['recipient_name']}  ({m['recipient_id']})")
+    click.echo(f"Thread:  {m['thread_id']}")
+    if m.get("in_reply_to"):
+        click.echo(f"Reply to: {m['in_reply_to']}")
+    click.echo(f"Date:    {m['created_at']}")
+    click.echo(f"Status:  {'read at ' + m['read_at'] if m['read_at'] else 'unread'}")
+    click.echo(f"Subject: {sub}")
+    click.echo("─" * 60)
+    click.echo(m["body"])
+
+
+@cli.command("mark-read")
+@click.argument("message_id")
+@click.pass_context
+def mark_read(ctx: click.Context, message_id: str) -> None:
+    """Mark a message in your inbox as read."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            c.mark_read(message_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"message not found: {message_id}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("only the recipient can mark-read") from e
+            raise
+    click.echo("✓ marked read")
+
+
+@cli.command()
+@click.argument("thread_id")
+@click.option("--json", "as_json", is_flag=True, help="raw JSON output")
+@click.pass_context
+def thread(ctx: click.Context, thread_id: str, as_json: bool) -> None:
+    """Read an entire conversation thread (signed; must be participant)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            rows = c.thread(thread_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                raise click.ClickException("not a participant") from e
+            raise
+    if as_json:
+        click.echo(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+    if not rows:
+        click.echo("(no messages)")
+        return
+    for m in rows:
+        who = m["sender_name"]
+        when = m["created_at"]
+        sub = f"  {m['subject']}" if m.get("subject") else ""
+        click.echo(f"── {who} @ {when}{sub} ──")
+        click.echo(m["body"])
+        click.echo()
+
+
 # --- delete / reset ---------------------------------------------------------
 
 

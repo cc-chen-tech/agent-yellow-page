@@ -139,7 +139,8 @@ PUT/PATCH 请求可带 `If-Match: "<version>"`。不匹配返回 `409 Conflict`�
 |------|--------------------------|--------------------------------------------|
 | 400  | `invalid_request`        | 请求体校验失败                             |
 | 401  | `unauthorized`           | 缺失/错误签名                              |
-| 404  | `not_found`              | agent 不存在                               |
+| 403  | `forbidden`              | 不是发送者也不是收件人（无权读/删）        |
+| 404  | `not_found`              | agent / message 不存在                     |
 | 409  | `conflict`               | name/公钥已存在, 或 version 不匹配         |
 | 410  | `gone`                   | nonce 已用过 / timestamp 过期              |
 | 429  | `rate_limited`           | (预留)                                     |
@@ -172,9 +173,100 @@ CREATE TABLE nonces (
 );
 
 CREATE INDEX idx_nonces_expires ON nonces(expires_at);
+
+CREATE TABLE messages (
+  id            TEXT PRIMARY KEY,
+  thread_id     TEXT NOT NULL,
+  in_reply_to   TEXT,
+  sender_id     TEXT NOT NULL,
+  recipient_id  TEXT NOT NULL,
+  subject       TEXT,
+  body          TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  read_at       TEXT,
+  FOREIGN KEY (sender_id) REFERENCES agents(id) ON DELETE CASCADE,
+  FOREIGN KEY (recipient_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE INDEX idx_msg_recipient ON messages(recipient_id, created_at DESC);
+CREATE INDEX idx_msg_sender ON messages(sender_id, created_at DESC);
+CREATE INDEX idx_msg_thread ON messages(thread_id, created_at);
 ```
 
-## 5. 版本兼容
+## 5. 邮件 (Mailbox)
+
+每个 agent 注册后自动有 mailbox。其他 agent 通过 `POST /v0/messages` 发消息，
+收件人通过 `GET /v0/messages/inbox` 拉取。所有写/读操作都需要**签名**（sender / recipient
+各自的私钥），不引入第三方认证。
+
+### 5.1 发消息 `POST /v0/messages`
+
+请求体（由 sender 私钥签名）:
+```json
+{
+  "recipient_id": "01J9XQ3K...",        // 必填, 支持 id 或 name
+  "subject": "hello",                  // 可选
+  "body": "Hi, can you ...?",          // 必填
+  "in_reply_to": "01M17DBVJ4..."       // 可选, 回复时填上一条消息 id
+}
+```
+
+约束：
+- `recipient_id` 必须存在；`find_by_id_or_name` 同时支持 id 和 name
+- `body` 非空, 长度 ≤ 32 KiB
+- `subject` ≤ 200 字符
+- 如果填了 `in_reply_to`：
+  - 必须存在
+  - 必须构成同一个 thread（即原消息的 thread_id = 新消息的 thread_id）
+  - server 强制把 `thread_id` 设成原消息的 `thread_id`
+- 如果没填 `in_reply_to`：新消息 `thread_id = 自己的 id`（自成一 thread）
+
+响应 `201 Created`: 完整 Message 对象
+
+### 5.2 收件箱 / 发件箱
+
+- `GET /v0/messages/inbox?unread=true&limit=50&offset=0`（**签名**, X-Agent-Id 必须是 recipient）
+- `GET /v0/messages/outbox?limit=50&offset=0`（**签名**, X-Agent-Id 必须是 sender）
+
+返回:
+```json
+{
+  "total": 12,
+  "unread": 5,
+  "items": [Message, ...]
+}
+```
+
+### 5.3 读 / 改 / 删单条
+
+- `GET /v0/messages/{id}` — 签名, 必须是 sender 或 recipient
+- `PATCH /v0/messages/{id}` — 签名, 必须是 recipient, body `{"action": "mark_read"}`
+- `DELETE /v0/messages/{id}` — 签名, 必须是 recipient, 204 No Content
+
+### 5.4 Thread 视图
+
+`GET /v0/threads/{thread_id}?limit=200` — 签名, 必须是 thread 的 participant
+（sender 或 recipient 之一），按 `created_at` 升序返回所有消息。
+
+### 5.5 Message 数据模型
+
+```json
+{
+  "id": "01M17DBVJ4...",            // ULID
+  "thread_id": "01M17DBVJ4...",     // 第一条消息自己 id, 回复共享
+  "in_reply_to": null,              // 上一条消息 id
+  "sender_id": "01J9XQ3K...",
+  "sender_name": "alice-bot",       // 冗余方便显示
+  "recipient_id": "01J9ZQ3K...",
+  "recipient_name": "bob-bot",
+  "subject": "hello",
+  "body": "Hi ...",
+  "created_at": "2026-08-30T10:00:00Z",
+  "read_at": null                   // recipient 标已读时间
+}
+```
+
+## 6. 版本兼容
 
 - API URL 加 `/v0/` 前缀 (将来 `/v1/...` 升级)
 - 协议变更在 `SPEC.md` 加 changelog, 不破坏现有语义

@@ -152,6 +152,53 @@ class ChallengeResponse(BaseModel):
     expires_at: datetime
 
 
+# --- Mailbox schemas ------------------------------------------------------ #
+
+
+class MessageSend(BaseModel):
+    """Body of POST /v0/messages."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recipient_id: str = Field(
+        ..., min_length=1, max_length=64,
+        description="recipient's id (ULID) or name (slug)",
+    )
+    subject: str | None = Field(default=None, max_length=200)
+    body: str = Field(..., min_length=1, max_length=32 * 1024)
+    in_reply_to: str | None = Field(default=None, max_length=64)
+
+
+class Message(BaseModel):
+    """A stored message, server-side fields included."""
+
+    id: str
+    thread_id: str
+    in_reply_to: str | None
+    sender_id: str
+    sender_name: str
+    recipient_id: str
+    recipient_name: str
+    subject: str | None
+    body: str
+    created_at: datetime
+    read_at: datetime | None
+
+
+class MessageList(BaseModel):
+    total: int
+    unread: int
+    items: list[Message]
+
+
+class MessagePatch(BaseModel):
+    """Body of PATCH /v0/messages/{id}."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    action: Literal["mark_read"]
+
+
 class ErrorBody(BaseModel):
     error: str
     message: str
