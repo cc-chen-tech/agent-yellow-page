@@ -60,9 +60,26 @@ def _kp_from_cfg(cfg: dict) -> KeyPair:
     return KeyPair.from_private_raw(base64.b64decode(cfg["private_key_raw_b64"]))
 
 
+def _config_path() -> Path:
+    """Resolve config path: ctx.obj if set, else env, else default."""
+    # (only consult env / default when ctx.obj hasn't been hydrated)
+    return Path(os.environ.get("AGENT_YP_CONFIG", str(DEFAULT_CONFIG)))
+
+
 def _client(ctx: click.Context) -> YellowPageClient:
-    cfg = ctx.obj["config"]
-    c = YellowPageClient(ctx.obj["server"])
+    """Build a client using ctx.obj if hydrated, else fall back to env / defaults.
+
+    This fallback is needed because the group callback doesn't run when a
+    subcommand is invoked directly (e.g. `agent-yp init ...`), so ctx.obj
+    may be empty. We read the same values from env / config file as fallback.
+    """
+    obj = ctx.obj or {}
+    cfg = obj.get("config")
+    if cfg is None:
+        cfg_path = obj.get("config_path") or _config_path()
+        cfg = _load(cfg_path)
+    server = obj.get("server") or os.environ.get("YELLOWPAGE_SERVER", DEFAULT_SERVER)
+    c = YellowPageClient(server)
     if "agent_id" in cfg and "private_key_raw_b64" in cfg:
         c.agent_id = cfg["agent_id"]
         c.keypair = _kp_from_cfg(cfg)
@@ -70,7 +87,11 @@ def _client(ctx: click.Context) -> YellowPageClient:
 
 
 def _require_init(ctx: click.Context) -> dict:
-    cfg = ctx.obj["config"]
+    obj = ctx.obj or {}
+    cfg = obj.get("config")
+    if cfg is None:
+        cfg_path = obj.get("config_path") or _config_path()
+        cfg = _load(cfg_path)
     if "agent_id" not in cfg:
         raise click.ClickException("not initialized — run `agent-yp init --name ...` first")
     return cfg
