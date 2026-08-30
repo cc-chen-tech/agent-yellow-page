@@ -225,6 +225,90 @@ class ChatMessageList(BaseModel):
     items: list[ChatMessage]
 
 
+# --- Private chatroom schemas -------------------------------------------- #
+
+
+class PrivateChatroomCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: NameStr
+    display_name: str | None = Field(default=None, max_length=128)
+    description: str | None = Field(default=None, max_length=2000)
+
+
+class PrivateChatroom(BaseModel):
+    """Public-facing view of a private chatroom."""
+
+    id: str
+    name: str
+    display_name: str | None
+    description: str | None
+    creator_id: str
+    creator_name: str
+    member_count: int
+    created_at: datetime
+
+
+class PrivateChatroomList(BaseModel):
+    total: int
+    items: list[PrivateChatroom]
+
+
+class PrivateInviteCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_uses: int | None = Field(default=None, ge=1, le=10000)
+    expires_in_seconds: int | None = Field(default=None, ge=1, le=30 * 86400)
+
+
+class PrivateInvite(BaseModel):
+    code: str
+    chatroom_id: str
+    created_by: str
+    created_at: datetime
+    expires_at: datetime | None
+    max_uses: int | None
+    used_count: int
+
+
+class PrivateJoinRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str = Field(..., min_length=4, max_length=64)
+
+
+class PrivateMember(BaseModel):
+    agent_id: str
+    name: str
+    joined_at: datetime
+    invited_by: str | None
+
+
+class PrivateMemberList(BaseModel):
+    total: int
+    items: list[PrivateMember]
+
+
+class PrivateChatMessageCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(..., min_length=1, max_length=4 * 1024)
+
+
+class PrivateChatMessage(BaseModel):
+    id: str
+    chatroom_id: str
+    sender_id: str
+    sender_name: str
+    body: str
+    created_at: datetime
+
+
+class PrivateChatMessageList(BaseModel):
+    total: int
+    items: list[PrivateChatMessage]
+
+
 class ErrorBody(BaseModel):
     error: str
     message: str

@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from .routes.agents import router as agents_router
 from .routes.chat import router as chat_router
 from .routes.messages import router as messages_router, threads_router
+from .routes.private_chat import router as private_chat_router
 from .storage import Storage
 
 DEFAULT_DB_PATH = os.environ.get("YELLOWPAGE_DB", "./data/yellowpage.db")
@@ -43,6 +44,7 @@ def create_app(db_path: str | os.PathLike = DEFAULT_DB_PATH) -> FastAPI:
     app.include_router(messages_router)
     app.include_router(threads_router)
     app.include_router(chat_router)
+    app.include_router(private_chat_router)
 
     @app.get("/healthz", tags=["meta"])
     async def healthz() -> dict:

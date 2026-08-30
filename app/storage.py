@@ -1,12 +1,15 @@
-"""SQLite storage layer — agents + nonces."""
+"""SQLite storage layer — agents + nonces + messages + chat + private chatrooms."""
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import sqlite3
 import threading
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -65,6 +68,50 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chat_created ON chat_messages(created_at DESC);
+
+CREATE TABLE IF NOT EXISTS private_chatrooms (
+  id            TEXT PRIMARY KEY,
+  name          TEXT NOT NULL UNIQUE,
+  display_name  TEXT,
+  description   TEXT,
+  creator_id    TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  FOREIGN KEY (creator_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS private_chatroom_members (
+  chatroom_id   TEXT NOT NULL,
+  agent_id      TEXT NOT NULL,
+  joined_at     TEXT NOT NULL,
+  invited_by    TEXT,
+  PRIMARY KEY (chatroom_id, agent_id),
+  FOREIGN KEY (chatroom_id) REFERENCES private_chatrooms(id) ON DELETE CASCADE,
+  FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS private_chatroom_invites (
+  code          TEXT PRIMARY KEY,
+  chatroom_id   TEXT NOT NULL,
+  created_by    TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  expires_at    TEXT,
+  max_uses      INTEGER,
+  used_count    INTEGER NOT NULL DEFAULT 0,
+  FOREIGN KEY (chatroom_id) REFERENCES private_chatrooms(id) ON DELETE CASCADE,
+  FOREIGN KEY (created_by) REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS private_chatroom_messages (
+  id            TEXT PRIMARY KEY,
+  chatroom_id   TEXT NOT NULL,
+  sender_id     TEXT NOT NULL,
+  body          TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  FOREIGN KEY (chatroom_id) REFERENCES private_chatrooms(id) ON DELETE CASCADE,
+  FOREIGN KEY (sender_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_pc_msgs_room ON private_chatroom_messages(chatroom_id, created_at);
 """
 
 
@@ -96,6 +143,7 @@ class Storage:
         # Sub-stores
         self.messages = MessageStore(self)
         self.chat = ChatStore(self)
+        self.private_chat = PrivateChatStore(self)
 
     def _migrate(self) -> None:
         with self._lock, self._conn:
@@ -582,5 +630,297 @@ class ChatStore:
         with self._tx() as conn:
             cur = conn.execute(
                 "DELETE FROM chat_messages WHERE id = ?", (message_id,)
+            )
+            return cur.rowcount == 1
+
+
+# --- private chatrooms --------------------------------------------------- #
+
+
+def _random_invite_code(nbytes: int = 16) -> str:
+    import base64
+
+    return base64.b64encode(os.urandom(nbytes)).decode("ascii")
+
+
+class PrivateChatStore:
+    """Storage for private chatrooms (existence public, content member-only)."""
+
+    def __init__(self, storage: "Storage"):
+        self._s = storage
+
+    @property
+    def _conn(self):
+        return self._s._conn
+
+    @property
+    def _lock(self):
+        return self._s._lock
+
+    @contextmanager
+    def _tx(self):
+        with self._s._tx() as conn:
+            yield conn
+
+    # ---- chatrooms ----
+
+    def _hydrate_room(self, row: dict) -> dict:
+        creator = self._s.get_by_id(row["creator_id"]) or {}
+        member_count = self._conn.execute(
+            "SELECT COUNT(*) AS c FROM private_chatroom_members WHERE chatroom_id = ?",
+            (row["id"],),
+        ).fetchone()["c"]
+        return {
+            **row,
+            "creator_name": creator.get("name", "?"),
+            "member_count": member_count,
+        }
+
+    def create_room(
+        self, room_id: str, name: str, creator_id: str, *, display_name=None, description=None
+    ) -> dict:
+        now = utcnow()
+        with self._tx() as conn:
+            try:
+                conn.execute(
+                    """
+                    INSERT INTO private_chatrooms
+                      (id, name, display_name, description, creator_id, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (room_id, name, display_name, description, creator_id, now.isoformat()),
+                )
+            except sqlite3.IntegrityError as e:
+                raise ConflictError("name", name) from e
+            # creator is automatically a member
+            conn.execute(
+                "INSERT INTO private_chatroom_members(chatroom_id, agent_id, joined_at, invited_by)"
+                " VALUES (?, ?, ?, NULL)",
+                (room_id, creator_id, now.isoformat()),
+            )
+        row = self.get_room(room_id)
+        assert row is not None
+        return row
+
+    def get_room(self, room_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM private_chatrooms WHERE id = ?", (room_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._hydrate_room(dict(row))
+
+    def find_room(self, id_or_name: str) -> dict | None:
+        if not id_or_name:
+            return None
+        if len(id_or_name) == 26 and id_or_name.isalnum() and id_or_name.isupper():
+            return self.get_room(id_or_name)
+        return self._conn.execute(
+            "SELECT * FROM private_chatrooms WHERE name = ?", (id_or_name,)
+        ).fetchone() and self._hydrate_room(
+            dict(
+                self._conn.execute(
+                    "SELECT * FROM private_chatrooms WHERE name = ?", (id_or_name,)
+                ).fetchone()
+            )
+        )
+
+    def list_rooms(
+        self, *, q: str | None = None, creator_id: str | None = None,
+        limit: int = 50, offset: int = 0,
+    ) -> tuple[int, list[dict]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if q:
+            like = f"%{q.lower()}%"
+            where.append("(LOWER(name) LIKE ? OR LOWER(display_name) LIKE ? OR LOWER(description) LIKE ?)")
+            params.extend([like, like, like])
+        if creator_id:
+            where.append("creator_id = ?")
+            params.append(creator_id)
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        with self._lock:
+            total = self._conn.execute(
+                f"SELECT COUNT(*) AS c FROM private_chatrooms {where_sql}", params
+            ).fetchone()["c"]
+            cur = self._conn.execute(
+                f"SELECT * FROM private_chatrooms {where_sql} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                params + [limit, offset],
+            )
+            rows = [self._hydrate_room(dict(r)) for r in cur.fetchall()]
+        return total, rows
+
+    def delete_room(self, room_id: str) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM private_chatrooms WHERE id = ?", (room_id,)
+            )
+            return cur.rowcount == 1
+
+    # ---- members ----
+
+    def add_member(
+        self, room_id: str, agent_id: str, invited_by: str | None
+    ) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO private_chatroom_members"
+                "(chatroom_id, agent_id, joined_at, invited_by) VALUES (?, ?, ?, ?)",
+                (room_id, agent_id, utcnow().isoformat(), invited_by),
+            )
+            return cur.rowcount == 1
+
+    def remove_member(self, room_id: str, agent_id: str) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM private_chatroom_members WHERE chatroom_id = ? AND agent_id = ?",
+                (room_id, agent_id),
+            )
+            return cur.rowcount == 1
+
+    def is_member(self, room_id: str, agent_id: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT 1 FROM private_chatroom_members WHERE chatroom_id = ? AND agent_id = ?",
+                (room_id, agent_id),
+            )
+            return cur.fetchone() is not None
+
+    def list_members(self, room_id: str) -> list[dict]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT m.agent_id, m.joined_at, m.invited_by, a.name"
+                " FROM private_chatroom_members m"
+                " LEFT JOIN agents a ON a.id = m.agent_id"
+                " WHERE m.chatroom_id = ?"
+                " ORDER BY m.joined_at",
+                (room_id,),
+            )
+            rows = cur.fetchall()
+            return [
+                {
+                    "agent_id": r["agent_id"],
+                    "name": r["name"] or "?",
+                    "joined_at": r["joined_at"],
+                    "invited_by": r["invited_by"],
+                }
+                for r in rows
+            ]
+
+    # ---- invites ----
+
+    def create_invite(
+        self,
+        code: str,
+        room_id: str,
+        created_by: str,
+        *,
+        max_uses: int | None,
+        expires_at: datetime | None,
+    ) -> dict:
+        now = utcnow()
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO private_chatroom_invites"
+                "(code, chatroom_id, created_by, created_at, expires_at, max_uses, used_count)"
+                " VALUES (?, ?, ?, ?, ?, ?, 0)",
+                (code, room_id, created_by, now.isoformat(),
+                 expires_at.isoformat() if expires_at else None, max_uses),
+            )
+        return self.get_invite(code)
+
+    def get_invite(self, code: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM private_chatroom_invites WHERE code = ?", (code,)
+            )
+            row = cur.fetchone()
+            return dict(row) if row else None
+
+    def list_invites_for_room(self, room_id: str) -> list[dict]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM private_chatroom_invites WHERE chatroom_id = ?"
+                " ORDER BY created_at DESC",
+                (room_id,),
+            )
+            return [dict(r) for r in cur.fetchall()]
+
+    def consume_invite(self, code: str) -> dict | None:
+        """Increment used_count; returns the (refreshed) invite row, or None if invalid/used/expired."""
+        invite = self.get_invite(code)
+        if invite is None:
+            return None
+        # expiry
+        if invite.get("expires_at"):
+            exp = datetime.fromisoformat(invite["expires_at"])
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=timezone.utc)
+            if exp < datetime.now(timezone.utc):
+                return None
+        # max_uses
+        if invite.get("max_uses") is not None and invite["used_count"] >= invite["max_uses"]:
+            return None
+        with self._tx() as conn:
+            conn.execute(
+                "UPDATE private_chatroom_invites SET used_count = used_count + 1 WHERE code = ?",
+                (code,),
+            )
+        return self.get_invite(code)
+
+    # ---- messages ----
+
+    def insert_message(self, msg_id: str, room_id: str, sender_id: str, body: str) -> dict:
+        now = utcnow()
+        with self._tx() as conn:
+            conn.execute(
+                "INSERT INTO private_chatroom_messages(id, chatroom_id, sender_id, body, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (msg_id, room_id, sender_id, body, now.isoformat()),
+            )
+        row = self.get_message(msg_id)
+        assert row is not None
+        return row
+
+    def get_message(self, msg_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM private_chatroom_messages WHERE id = ?", (msg_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            d = dict(row)
+            sender = self._s.get_by_id(d["sender_id"]) or {}
+            return {**d, "sender_name": sender.get("name", "?")}
+
+    def list_messages(
+        self, room_id: str, *, limit: int = 50, offset: int = 0
+    ) -> tuple[int, list[dict]]:
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM private_chatroom_messages WHERE chatroom_id = ?",
+                (room_id,),
+            ).fetchone()["c"]
+            cur = self._conn.execute(
+                "SELECT * FROM private_chatroom_messages WHERE chatroom_id = ?"
+                " ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                (room_id, limit, offset),
+            )
+            rows = cur.fetchall()
+            hydrated = []
+            for r in rows:
+                d = dict(r)
+                sender = self._s.get_by_id(d["sender_id"]) or {}
+                d["sender_name"] = sender.get("name", "?")
+                hydrated.append(d)
+        return total, hydrated
+
+    def delete_message(self, msg_id: str) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM private_chatroom_messages WHERE id = ?", (msg_id,)
             )
             return cur.rowcount == 1

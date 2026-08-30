@@ -286,3 +286,133 @@ class YellowPageClient:
         headers = self._sign_headers("DELETE", path, b"")
         r = self._http.delete(path, headers=headers)
         r.raise_for_status()
+
+    # --- private chatrooms --------------------------------------------- #
+
+    def pc_create(
+        self,
+        name: str,
+        *,
+        display_name: str | None = None,
+        description: str | None = None,
+    ) -> dict:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        import json as _json
+
+        path = "/v0/private-chatrooms"
+        body_bytes = _json.dumps(
+            {"name": name, "display_name": display_name, "description": description},
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        headers = self._sign_headers("POST", path, body_bytes)
+        headers["Content-Type"] = "application/json"
+        r = self._http.post(path, content=body_bytes, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def pc_list(
+        self, *, q: str | None = None, creator: str | None = None,
+        limit: int = 50, offset: int = 0,
+    ) -> dict:
+        # public
+        params: list[tuple[str, str]] = []
+        if q:
+            params.append(("q", q))
+        if creator:
+            params.append(("creator", creator))
+        params.append(("limit", str(limit)))
+        params.append(("offset", str(offset)))
+        r = self._http.get("/v0/private-chatrooms?" + urlencode(params))
+        r.raise_for_status()
+        return r.json()
+
+    def pc_info(self, id_or_name: str) -> dict:
+        # public
+        r = self._http.get(f"/v0/private-chatrooms/{id_or_name}")
+        r.raise_for_status()
+        return r.json()
+
+    def pc_invite(
+        self, id_or_name: str, *, max_uses: int | None = None,
+        expires_in_seconds: int | None = None,
+    ) -> dict:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        import json as _json
+
+        path = f"/v0/private-chatrooms/{id_or_name}/invites"
+        body_bytes = _json.dumps(
+            {"max_uses": max_uses, "expires_in_seconds": expires_in_seconds},
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode("utf-8")
+        headers = self._sign_headers("POST", path, body_bytes)
+        headers["Content-Type"] = "application/json"
+        r = self._http.post(path, content=body_bytes, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def pc_join(self, id_or_name: str, code: str) -> dict:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        import json as _json
+
+        path = f"/v0/private-chatrooms/{id_or_name}/join"
+        body_bytes = _json.dumps(
+            {"code": code}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        headers = self._sign_headers("POST", path, body_bytes)
+        headers["Content-Type"] = "application/json"
+        r = self._http.post(path, content=body_bytes, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def pc_leave(self, id_or_name: str) -> None:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        path = f"/v0/private-chatrooms/{id_or_name}/leave"
+        headers = self._sign_headers("POST", path, b"")
+        r = self._http.post(path, headers=headers)
+        r.raise_for_status()
+
+    def pc_members(self, id_or_name: str) -> dict:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        path = f"/v0/private-chatrooms/{id_or_name}/members"
+        headers = self._sign_headers("GET", path, b"")
+        r = self._http.get(path, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def pc_send(self, id_or_name: str, body: str) -> dict:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        import json as _json
+
+        path = f"/v0/private-chatrooms/{id_or_name}/messages"
+        body_bytes = _json.dumps(
+            {"body": body}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        headers = self._sign_headers("POST", path, body_bytes)
+        headers["Content-Type"] = "application/json"
+        r = self._http.post(path, content=body_bytes, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def pc_messages(self, id_or_name: str, *, limit: int = 50, offset: int = 0) -> dict:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        path = f"/v0/private-chatrooms/{id_or_name}/messages"
+        headers = self._sign_headers("GET", path, b"")
+        params = {"limit": str(limit), "offset": str(offset)}
+        r = self._http.get(path + "?" + urlencode(params), headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def pc_delete(self, id_or_name: str) -> None:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair required")
+        path = f"/v0/private-chatrooms/{id_or_name}"
+        headers = self._sign_headers("DELETE", path, b"")
+        r = self._http.delete(path, headers=headers)
+        r.raise_for_status()

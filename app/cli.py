@@ -646,6 +646,242 @@ def chat_delete(ctx: click.Context, message_id: str, yes: bool) -> None:
     click.echo("✓ deleted")
 
 
+# --- private chatrooms (pc) ----------------------------------------------- #
+
+
+@cli.group()
+def pc() -> None:
+    """Private chatrooms — existence public, content member-only."""
+
+
+@pc.command(name="create")
+@click.option("--name", required=True, help="unique slug [a-z0-9-]{3,64}")
+@click.option("--display-name", default=None)
+@click.option("--description", default=None)
+@click.pass_context
+def pc_create(ctx: click.Context, name: str, display_name: str | None, description: str | None) -> None:
+    """Create a new private chatroom. You become the creator + first member."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            room = c.pc_create(name, display_name=display_name, description=description)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 409:
+                raise click.ClickException(f"name already taken: {name}") from e
+            raise
+    click.echo(f"✓ created  id={room['id']}  name={room['name']}")
+
+
+@pc.command(name="list")
+@click.option("--q", default=None, help="substring search")
+@click.option("--creator", default=None, help="filter by creator (id or name)")
+@click.option("--limit", default=50, type=click.IntRange(1, 200), show_default=True)
+@click.option("--offset", default=0, type=click.IntRange(min=0), show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="raw JSON output")
+@click.pass_context
+def pc_list(
+    ctx: click.Context, q: str | None, creator: str | None,
+    limit: int, offset: int, as_json: bool,
+) -> None:
+    """List all private chatrooms (public)."""
+    from .client import YellowPageClient
+    c = YellowPageClient(ctx.obj["server"])
+    with c as cli_client:
+        result = cli_client.pc_list(q=q, creator=creator, limit=limit, offset=offset)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"total: {result['total']}  showing: {len(result['items'])}")
+    for r in result["items"]:
+        click.echo(
+            f"  {r['id']}  {r['name']:30s}  creator={r['creator_name']:20s}  members={r['member_count']}"
+        )
+        if r.get("description"):
+            click.echo(f"      {r['description'][:80]}")
+
+
+@pc.command(name="info")
+@click.argument("target")
+@click.pass_context
+def pc_info(ctx: click.Context, target: str) -> None:
+    """Show metadata for a private chatroom (public, member list NOT shown)."""
+    from .client import YellowPageClient
+    with YellowPageClient(ctx.obj["server"]) as cli_client:
+        try:
+            r = cli_client.pc_info(target)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            raise
+    click.echo(f"id:          {r['id']}")
+    click.echo(f"name:        {r['name']}")
+    click.echo(f"display:     {r.get('display_name') or '-'}")
+    click.echo(f"description: {r.get('description') or '-'}")
+    click.echo(f"creator:     {r['creator_name']}  ({r['creator_id']})")
+    click.echo(f"members:     {r['member_count']}")
+    click.echo(f"created:     {r['created_at']}")
+
+
+@pc.command(name="invite")
+@click.argument("target")
+@click.option("--max-uses", default=None, type=click.IntRange(1, 10000), help="default 1")
+@click.option("--expires-in-seconds", default=None, type=click.IntRange(1, 2592000), help="default 86400 (24h)")
+@click.pass_context
+def pc_invite(
+    ctx: click.Context, target: str, max_uses: int | None, expires_in_seconds: int | None,
+) -> None:
+    """Generate an invite code (creator only). Send it to the recipient via mailbox."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            inv = c.pc_invite(target, max_uses=max_uses, expires_in_seconds=expires_in_seconds)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("only the creator can invite") from e
+            raise
+    click.echo(f"code:        {inv['code']}")
+    click.echo(f"max_uses:    {inv['max_uses']}")
+    click.echo(f"expires_at:  {inv['expires_at']}")
+    click.echo()
+    click.echo("Send this code to the recipient (e.g. via `agent-yp send <creator> --body '<code>'`)")
+
+
+@pc.command(name="join")
+@click.argument("target")
+@click.option("--code", required=True, help="invite code from the chatroom creator")
+@click.pass_context
+def pc_join(ctx: click.Context, target: str, code: str) -> None:
+    """Join a private chatroom using an invite code."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            room = c.pc_join(target, code)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            if e.response.status_code == 410:
+                raise click.ClickException("invite is invalid, expired, or exhausted") from e
+            if e.response.status_code == 409:
+                raise click.ClickException("you are already a member") from e
+            raise
+    click.echo(f"✓ joined  {room['name']}  (members={room['member_count']})")
+
+
+@pc.command(name="leave")
+@click.argument("target")
+@click.pass_context
+def pc_leave(ctx: click.Context, target: str) -> None:
+    """Leave a private chatroom (member only)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            c.pc_leave(target)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("you are not a member") from e
+            raise
+    click.echo("✓ left")
+
+
+@pc.command(name="members")
+@click.argument("target")
+@click.option("--json", "as_json", is_flag=True, help="raw JSON output")
+@click.pass_context
+def pc_members(ctx: click.Context, target: str, as_json: bool) -> None:
+    """List members of a private chatroom (member only)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            result = c.pc_members(target)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("only members can see the member list") from e
+            raise
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"total: {result['total']}")
+    for m in result["items"]:
+        inv = m.get("invited_by") or "(creator)"
+        click.echo(f"  {m['agent_id']}  {m['name']:24s}  joined={m['joined_at']}  by={inv}")
+
+
+@pc.command(name="send")
+@click.argument("target")
+@click.argument("body")
+@click.pass_context
+def pc_send(ctx: click.Context, target: str, body: str) -> None:
+    """Post a message to a private chatroom (member only)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            m = c.pc_send(target, body)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("only members can post") from e
+            raise
+    click.echo(f"✓ sent  id={m['id']}  at={m['created_at']}")
+
+
+@pc.command(name="messages")
+@click.argument("target")
+@click.option("--limit", default=50, type=click.IntRange(1, 500), show_default=True)
+@click.option("--offset", default=0, type=click.IntRange(min=0), show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="raw JSON output")
+@click.pass_context
+def pc_messages(
+    ctx: click.Context, target: str, limit: int, offset: int, as_json: bool,
+) -> None:
+    """List messages in a private chatroom (member only, oldest first)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            result = c.pc_messages(target, limit=limit, offset=offset)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("only members can read") from e
+            raise
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"total: {result['total']}  showing: {len(result['items'])}")
+    for m in result["items"]:
+        click.echo(f"── {m['sender_name']} @ {m['created_at']} ──")
+        click.echo(m["body"])
+        click.echo()
+
+
+@pc.command(name="delete")
+@click.argument("target")
+@click.option("-y", "--yes", is_flag=True, help="skip confirmation")
+@click.pass_context
+def pc_delete(ctx: click.Context, target: str, yes: bool) -> None:
+    """Delete (disband) a private chatroom — creator only. Cascades everything."""
+    _require_init(ctx)
+    if not yes:
+        click.confirm(f"disband private chatroom '{target}'?", abort=True)
+    with _client(ctx) as c:
+        try:
+            c.pc_delete(target)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chatroom not found: {target}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("only the creator can disband") from e
+            raise
+    click.echo("✓ disbanded")
+
+
 # --- delete / reset ---------------------------------------------------------
 
 
