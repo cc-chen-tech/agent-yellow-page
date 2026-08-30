@@ -467,3 +467,90 @@ def test_cli_send_requires_init(env):
     r = runner.invoke(cli, ["send", "whoever", "--body", "x"])
     assert r.exit_code != 0
     assert "not initialized" in r.output
+
+
+# ============================================================================
+# public chatroom
+# ============================================================================
+
+
+def test_cli_chat_post_list_read_delete(env):
+    server, _cfg = env
+    runner = CliRunner()
+    runner.invoke(cli, ["init", "--name", f"chatter-{uuid.uuid4().hex[:8]}"])
+
+    # post
+    r = runner.invoke(cli, ["chat", "post", "hello chatroom"])
+    assert r.exit_code == 0, r.output
+    assert "posted" in r.output
+    msg_id = re.search(r"id=(\w{26})", r.output).group(1)
+
+    # list (public — works without init too)
+    r = runner.invoke(cli, ["chat", "list"])
+    assert r.exit_code == 0, r.output
+    assert "hello chatroom" in r.output
+    assert f"chatter-" in r.output
+
+    # list --json
+    r = runner.invoke(cli, ["chat", "list", "--json"])
+    assert r.exit_code == 0
+    parsed = json.loads(r.output)
+    assert parsed["total"] == 1
+    assert parsed["items"][0]["id"] == msg_id
+
+    # read (public)
+    r = runner.invoke(cli, ["chat", "read", msg_id])
+    assert r.exit_code == 0, r.output
+    assert "hello chatroom" in r.output
+    assert "chatter-" in r.output
+
+    # delete (signed, only sender can)
+    r = runner.invoke(cli, ["chat", "delete", msg_id, "-y"])
+    assert r.exit_code == 0, r.output
+    assert "deleted" in r.output
+
+    # gone
+    r = runner.invoke(cli, ["chat", "list"])
+    assert "hello chatroom" not in r.output
+
+
+def test_cli_chat_post_requires_init(env):
+    _server, _cfg = env
+    runner = CliRunner()
+    r = runner.invoke(cli, ["chat", "post", "x"])
+    assert r.exit_code != 0
+    assert "not initialized" in r.output
+
+
+def test_cli_chat_list_works_without_init(env):
+    """Public read — should work even when there's no local config."""
+    _server, _cfg = env
+    runner = CliRunner()
+    r = runner.invoke(cli, ["chat", "list"])
+    assert r.exit_code == 0
+    assert "total: 0" in r.output
+
+
+def test_cli_chat_stranger_cannot_delete(env):
+    """Even with a signed request, only the sender can delete their own message."""
+    server, _cfg = env
+
+    # Alice posts a message
+    alice_runner = CliRunner()
+    alice_runner.invoke(cli, ["init", "--name", f"alice-{uuid.uuid4().hex[:8]}"])
+    r = alice_runner.invoke(cli, ["chat", "post", "alice says hi"])
+    assert r.exit_code == 0, r.output
+    msg_id = re.search(r"id=(\w{26})", r.output).group(1)
+
+    # Eve — register as a real agent so her keypair is valid
+    eve_id, eve_name, eve_kp = _register_other(server, "eve")
+    eve_cfg = os.path.join(os.path.dirname(_cfg), "eve.json")
+    _write_config(eve_cfg, server, eve_id, eve_name, eve_kp)
+    eve_runner = CliRunner()
+    r = eve_runner.invoke(cli, ["--config", eve_cfg, "chat", "delete", msg_id, "-y"])
+    assert r.exit_code != 0
+    assert "403" in r.output or "only the sender" in r.output
+
+    # Alice can still see her message
+    r = alice_runner.invoke(cli, ["chat", "list"])
+    assert "alice says hi" in r.output

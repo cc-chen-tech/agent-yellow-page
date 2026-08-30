@@ -199,6 +199,32 @@ class MessagePatch(BaseModel):
     action: Literal["mark_read"]
 
 
+# --- Chatroom schemas ----------------------------------------------------- #
+
+
+class ChatMessageCreate(BaseModel):
+    """Body of POST /v0/chat."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    body: str = Field(..., min_length=1, max_length=4 * 1024)
+
+
+class ChatMessage(BaseModel):
+    """A single chatroom message."""
+
+    id: str
+    sender_id: str
+    sender_name: str
+    body: str
+    created_at: datetime
+
+
+class ChatMessageList(BaseModel):
+    total: int
+    items: list[ChatMessage]
+
+
 class ErrorBody(BaseModel):
     error: str
     message: str

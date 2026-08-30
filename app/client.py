@@ -246,3 +246,43 @@ class YellowPageClient:
         r = self._http.get(path + "?" + urlencode(params), headers=headers)
         r.raise_for_status()
         return r.json()
+
+    # --- public chatroom ----------------------------------------------- #
+    # List/get are public (no signing); post/delete require signing.
+
+    def chat_post(self, body: str) -> dict:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set for chat_post")
+        import json as _json
+
+        path = "/v0/chat"
+        body_bytes = _json.dumps(
+            {"body": body}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8")
+        headers = self._sign_headers("POST", path, body_bytes)
+        headers["Content-Type"] = "application/json"
+        r = self._http.post(path, content=body_bytes, headers=headers)
+        r.raise_for_status()
+        return r.json()
+
+    def chat_list(self, *, limit: int = 50, offset: int = 0) -> dict:
+        # public — no signing
+        r = self._http.get(
+            "/v0/chat?" + urlencode({"limit": str(limit), "offset": str(offset)})
+        )
+        r.raise_for_status()
+        return r.json()
+
+    def chat_get(self, message_id: str) -> dict:
+        # public — no signing
+        r = self._http.get(f"/v0/chat/{message_id}")
+        r.raise_for_status()
+        return r.json()
+
+    def chat_delete(self, message_id: str) -> None:
+        if not (self.agent_id and self.keypair):
+            raise RuntimeError("agent_id and keypair must be set for chat_delete")
+        path = f"/v0/chat/{message_id}"
+        headers = self._sign_headers("DELETE", path, b"")
+        r = self._http.delete(path, headers=headers)
+        r.raise_for_status()

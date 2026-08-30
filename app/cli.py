@@ -554,6 +554,98 @@ def thread(ctx: click.Context, thread_id: str, as_json: bool) -> None:
         click.echo()
 
 
+# --- public chatroom ------------------------------------------------------- #
+
+
+@cli.group()
+def chat() -> None:
+    """Public chatroom — anyone can read, signed writes only."""
+
+
+@chat.command(name="post")
+@click.argument("body")
+@click.pass_context
+def chat_post(ctx: click.Context, body: str) -> None:
+    """Post a message to the public chatroom (signed)."""
+    _require_init(ctx)
+    with _client(ctx) as c:
+        try:
+            m = c.chat_post(body)
+        except httpx.HTTPStatusError as e:
+            raise
+    click.echo(f"✓ posted  id={m['id']}  at={m['created_at']}")
+
+
+@chat.command(name="list")
+@click.option("--limit", default=50, type=click.IntRange(1, 200), show_default=True)
+@click.option("--offset", default=0, type=click.IntRange(min=0), show_default=True)
+@click.option("--json", "as_json", is_flag=True, help="raw JSON output")
+@click.pass_context
+def chat_list(ctx: click.Context, limit: int, offset: int, as_json: bool) -> None:
+    """List public chatroom messages (newest first). No signing needed."""
+    # Public read — works even if not init'd
+    c = ctx.obj["server"]
+    from .client import YellowPageClient
+
+    with YellowPageClient(c) as cli_client:
+        result = cli_client.chat_list(limit=limit, offset=offset)
+    if as_json:
+        click.echo(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    click.echo(f"total: {result['total']}  showing: {len(result['items'])} (offset={offset})")
+    for m in result["items"]:
+        # first line of body (truncated)
+        first = m["body"].splitlines()[0][:80] if m["body"] else ""
+        click.echo(f"  {m['id']}  {m['sender_name']:24s}  {first}")
+        # show rest of body if multi-line
+        rest = "\n".join(m["body"].splitlines()[1:])[:200]
+        if rest:
+            for line in rest.splitlines()[:3]:
+                click.echo(f"      {line}")
+
+
+@chat.command(name="read")
+@click.argument("message_id")
+@click.pass_context
+def chat_read(ctx: click.Context, message_id: str) -> None:
+    """Read a single chatroom message (public)."""
+    c = ctx.obj["server"]
+    from .client import YellowPageClient
+
+    with YellowPageClient(c) as cli_client:
+        try:
+            m = cli_client.chat_get(message_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chat message not found: {message_id}") from e
+            raise
+    click.echo(f"From: {m['sender_name']}  ({m['sender_id']})")
+    click.echo(f"At:   {m['created_at']}")
+    click.echo("─" * 60)
+    click.echo(m["body"])
+
+
+@chat.command(name="delete")
+@click.argument("message_id")
+@click.option("-y", "--yes", is_flag=True, help="skip confirmation")
+@click.pass_context
+def chat_delete(ctx: click.Context, message_id: str, yes: bool) -> None:
+    """Delete your own chatroom message (signed)."""
+    _require_init(ctx)
+    if not yes:
+        click.confirm(f"delete chat message {message_id}?", abort=True)
+    with _client(ctx) as c:
+        try:
+            c.chat_delete(message_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise click.ClickException(f"chat message not found: {message_id}") from e
+            if e.response.status_code == 403:
+                raise click.ClickException("only the sender can delete") from e
+            raise
+    click.echo("✓ deleted")
+
+
 # --- delete / reset ---------------------------------------------------------
 
 

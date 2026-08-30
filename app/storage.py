@@ -55,6 +55,16 @@ CREATE TABLE IF NOT EXISTS messages (
 CREATE INDEX IF NOT EXISTS idx_msg_recipient ON messages(recipient_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_sender ON messages(sender_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_msg_thread ON messages(thread_id, created_at);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id            TEXT PRIMARY KEY,
+  sender_id     TEXT NOT NULL,
+  body          TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  FOREIGN KEY (sender_id) REFERENCES agents(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_chat_created ON chat_messages(created_at DESC);
 """
 
 
@@ -85,6 +95,7 @@ class Storage:
         self._migrate()
         # Sub-stores
         self.messages = MessageStore(self)
+        self.chat = ChatStore(self)
 
     def _migrate(self) -> None:
         with self._lock, self._conn:
@@ -495,3 +506,81 @@ class MessageStore:
 
     def is_participant(self, message: dict, agent_id: str) -> bool:
         return message["sender_id"] == agent_id or message["recipient_id"] == agent_id
+
+
+# --- chatroom ------------------------------------------------------------ #
+
+
+class ChatStore:
+    """Public chatroom — anyone can read, signed writes only.
+
+    Bodies are kept short (caller is responsible for enforcing limits via
+    Pydantic on the request side).
+    """
+
+    def __init__(self, storage: "Storage"):
+        self._s = storage
+
+    @property
+    def _conn(self):
+        return self._s._conn
+
+    @property
+    def _lock(self):
+        return self._s._lock
+
+    @contextmanager
+    def _tx(self):
+        with self._s._tx() as conn:
+            yield conn
+
+    def _hydrate(self, row: dict) -> dict:
+        sender = self._s.get_by_id(row["sender_id"]) or {}
+        return {**row, "sender_name": sender.get("name", "?")}
+
+    def insert(self, message_id: str, sender_id: str, body: str) -> dict:
+        now = utcnow()
+        row = {
+            "id": message_id,
+            "sender_id": sender_id,
+            "body": body,
+            "created_at": now.isoformat(),
+        }
+        with self._tx() as conn:
+            conn.execute(
+                """
+                INSERT INTO chat_messages (id, sender_id, body, created_at)
+                VALUES (:id, :sender_id, :body, :created_at)
+                """,
+                row,
+            )
+        return self._hydrate(row)
+
+    def get_by_id(self, message_id: str) -> dict | None:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM chat_messages WHERE id = ?", (message_id,)
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            return self._hydrate(dict(row))
+
+    def list(self, *, limit: int = 50, offset: int = 0) -> tuple[int, list[dict]]:
+        with self._lock:
+            total = self._conn.execute(
+                "SELECT COUNT(*) AS c FROM chat_messages"
+            ).fetchone()["c"]
+            cur = self._conn.execute(
+                "SELECT * FROM chat_messages ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                [limit, offset],
+            )
+            rows = [self._hydrate(dict(r)) for r in cur.fetchall()]
+        return total, rows
+
+    def delete(self, message_id: str) -> bool:
+        with self._tx() as conn:
+            cur = conn.execute(
+                "DELETE FROM chat_messages WHERE id = ?", (message_id,)
+            )
+            return cur.rowcount == 1
