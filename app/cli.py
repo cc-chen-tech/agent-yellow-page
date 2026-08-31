@@ -398,6 +398,8 @@ def send(
                 raise click.ClickException(f"recipient not found: {recipient}") from e
             if e.response.status_code == 403:
                 raise click.ClickException("not allowed (must be participant of parent message)") from e
+            if e.response.status_code == 400:
+                raise click.ClickException("server rejected: cannot send to yourself") from e
             raise
     click.echo(f"✓ sent  id={msg['id']}  thread={msg['thread_id']}  to={msg['recipient_name']}")
 
